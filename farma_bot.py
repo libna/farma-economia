@@ -2,7 +2,8 @@ import logging
 import sqlite3
 import os
 from dotenv import load_dotenv
-from telegram import Update
+from thefuzz import process, fuzz
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 # Carrega variáveis de ambiente do arquivo .env
@@ -18,8 +19,6 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 def init_db():
     """Inicializa o banco de dados SQLite com a Super Lista (+100 itens) incluindo Calcitriol."""
-    # Como vamos para o Railway, você pode escolher manter :memory: 
-    # ou salvar em arquivo 'farma.db' para não perder dados entre deploys.
     conn = sqlite3.connect(':memory:', check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute('''
@@ -33,7 +32,7 @@ def init_db():
         )
     ''')
 
-    # Super Lista estratégica
+    # Super Lista estratégica (Dados Restaurados e Completos)
     dados = [
         # ADIÇÃO ESPECIAL PARA SUA AMIGA
         ('Rocaltrol', 'Calcitriol', 'REFERENCIA', '0.25mcg capsula', 115.00),
@@ -108,28 +107,65 @@ def init_db():
 # Inicializa banco global
 db_conn = init_db()
 
+def buscar_remedio_inteligente(termo_usuario, conn):
+    cursor = conn.cursor()
+    # 1. Pegamos todos os nomes de remédios de REFERENCIA para comparar
+    cursor.execute("SELECT DISTINCT nome FROM remedio WHERE tipo = 'REFERENCIA'")
+    nomes_referencia = [row[0] for row in cursor.fetchall()]
+    
+    if not nomes_referencia:
+        return None, False
+        
+    # 2. Encontramos a melhor correspondência
+    melhor_match, score = process.extractOne(termo_usuario, nomes_referencia, scorer=fuzz.token_sort_ratio)
+    
+    print(f"DEBUG: Usuário digitou '{termo_usuario}', match com '{melhor_match}' (Score: {score})")
+    
+    if score >= 85:
+        # Se for quase igual, já faz a busca direto com o nome corrigido
+        return melhor_match, True
+    elif score >= 60:
+        # Se for parecido, retorna para sugerir ao usuário
+        return melhor_match, False
+    else:
+        # Se for nada a ver, não encontrou
+        return None, False
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text.strip()
     cursor = db_conn.cursor()
     
-    # 1. Busca o remédio digitado
-    cursor.execute("SELECT nome, principio_ativo, tipo, apresentacao, preco FROM remedio WHERE nome = ? COLLATE NOCASE", (user_text,))
-    ref = cursor.fetchone()
+    # Busca inteligente
+    nome_correto, exato = buscar_remedio_inteligente(user_text, db_conn)
     
-    if not ref:
-        await update.message.reply_text(f"Poxa, ainda não temos o medicamento '{user_text}' em nossa base. 😕")
-        return
-
-    nome_ref, principio, tipo, apresentacao, preco_ref = ref
-    
-    if tipo != 'REFERENCIA':
+    if not nome_correto:
         await update.message.reply_text(
-            f"Encontrei o {nome_ref} ({tipo}), que custa R$ {preco_ref:.2f}. "
-            "Para comparar preços, tente digitar o nome de um medicamento de referência (ex: Buscofem)."
+            f"Poxa, ainda não temos o medicamento '{user_text}' em nossa base. 😕",
+            reply_markup=ReplyKeyboardRemove()
         )
         return
 
-    # 2. Busca genéricos equivalentes
+    if not exato:
+        # Sugestão amigável caso tenha erro de digitação
+        keyboard = [[nome_correto]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            f"Você quis dizer '{nome_correto}'? Clique no botão abaixo para confirmar:",
+            reply_markup=reply_markup
+        )
+        return
+
+    # Se chegou aqui, nome_correto é o nome exato do remédio de REFERENCIA
+    cursor.execute("SELECT nome, principio_ativo, tipo, apresentacao, preco FROM remedio WHERE nome = ?", (nome_correto,))
+    res = cursor.fetchone()
+    
+    if not res:
+        await update.message.reply_text("Ocorreu um erro ao buscar os dados do medicamento.", reply_markup=ReplyKeyboardRemove())
+        return
+        
+    nome_ref, principio, tipo, apresentacao, preco_ref = res
+
+    # Busca genéricos equivalentes
     cursor.execute("""
         SELECT nome, preco FROM remedio 
         WHERE principio_ativo = ? AND apresentacao = ? AND tipo = 'GENERICO'
@@ -141,7 +177,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not generico:
         await update.message.reply_text(
             f"Encontrei o {nome_ref} (R$ {preco_ref:.2f}), mas não temos genéricos para "
-            f"{principio} ({apresentacao}) no momento."
+            f"{principio} ({apresentacao}) no momento.",
+            reply_markup=ReplyKeyboardRemove()
         )
         return
 
@@ -157,7 +194,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📉 Economia de: R$ {economia_reais:.2f} ({economia_percent:.1f}%)"
     )
     
-    await update.message.reply_text(resposta)
+    await update.message.reply_text(resposta, reply_markup=ReplyKeyboardRemove())
 
 if __name__ == '__main__':
     # Inicialização direta, sem proxy (Railway/Render/Local)
