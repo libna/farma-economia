@@ -259,80 +259,110 @@ async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("⛔ Acesso negado.")
         return
 
-    caminho_arquivo = "data/lista_anvisa.xlsx"
+    # Procura pelo arquivo default ou o específico anterior
+    arquivo_default = "data/lista_anvisa.xlsx"
+    caminho_arquivo = arquivo_default if os.path.exists(arquivo_default) else "data/xls_conformidade_site_20260416_151911506.xlsx"
+
     if not os.path.exists(caminho_arquivo):
         await update.message.reply_text(f"❌ Erro: Arquivo {caminho_arquivo} não encontrado em /data.")
         return
 
-    await update.message.reply_text("🚀 Iniciando processamento do arquivo ANVISA... Isso pode demorar.")
+    await update.message.reply_text(f"🚀 Iniciando processamento de {os.path.basename(caminho_arquivo)}...\nLendo com skiprows=41.")
 
     try:
-        # Mapeamento esperado vs Real no Excel
+        # 1. Leitura Precisa com skiprows
+        df = pd.read_excel(caminho_arquivo, skiprows=41)
+        logging.info(f"Linhas lidas após skiprows: {len(df)}")
+        
+        # 2. Mapeamento de Colunas (Case Sensitive)
         mapeamento = {
-            'EAN 1': ['EAN 1', 'EAN1', 'CODIGO EAN'],
-            'SUBSTÂNCIA': ['SUBSTÂNCIA', 'SUBSTANCIA', 'PRINCIPIO ATIVO', 'PRINCÍPIO ATIVO'],
-            'PRODUTO': ['PRODUTO', 'NOME COMERCIAL', 'NOME DO PRODUTO'],
-            'LABORATÓRIO': ['LABORATÓRIO', 'LABORATORIO', 'FABRICANTE'],
-            'APRESENTAÇÃO': ['APRESENTAÇÃO', 'APRESENTACAO', 'EMBALAGEM'],
-            'TIPO DE PRODUTO': ['TIPO DE PRODUTO', 'TIPO', 'CATEGORIA'],
-            'PMC 20%': ['PMC 20%', 'PMC 20', 'PREÇO MÁXIMO AO CONSUMIDOR 20%', 'PMC_20']
+            'EAN 1': 'ean',
+            'SUBSTÂNCIA': 'principio_ativo',
+            'PRODUTO': 'nome_comercial',
+            'LABORATÓRIO': 'laboratorio',
+            'APRESENTAÇÃO': 'apresentacao',
+            'PMC 20%': 'preco',
+            'TIPO DE PRODUTO (STATUS DO PRODUTO)': 'tipo'
         }
 
-        df = None
-        colunas_finais = {}
-        
-        # Tentativa inteligente de encontrar o cabeçalho (pula até 60 linhas de lixo da ANVISA)
-        for i in range(0, 60):
-            temp_df = pd.read_excel(caminho_arquivo, skiprows=i, nrows=5) # Lê apenas o topo para validar
-            cols_atuais = [str(c).strip().upper() for c in temp_df.columns]
-            
-            temp_map = {}
-            for original, variantes in mapeamento.items():
-                for v in variantes:
-                    if v.upper() in cols_atuais:
-                        # Encontra o nome exato da coluna no DF original
-                        idx = cols_atuais.index(v.upper())
-                        temp_map[original] = temp_df.columns[idx]
-                        break
-            
-            # Se encontrou todas as colunas essenciais
-            if len(temp_map) == len(mapeamento):
-                df = pd.read_excel(caminho_arquivo, skiprows=i)
-                colunas_finais = temp_map
-                break
-        
-        if df is None:
-            # Diagnóstico para o usuário
-            temp_lixo = pd.read_excel(caminho_arquivo, nrows=5)
-            lista_cols = ", ".join([str(c) for c in temp_lixo.columns])
-            await update.message.reply_text(f"❌ Erro: Colunas não encontradas.\n\nColunas detectadas no topo do arquivo: [{lista_cols}]\n\nPor favor, verifique se o arquivo segue o padrão da ANVISA.")
+        # Verifica se as colunas existem
+        colunas_faltando = [col for col in mapeamento.keys() if col not in df.columns]
+        if colunas_faltando:
+            lista_cols = ", ".join([str(c) for c in df.columns[:15]]) # Mostra as 15 primeiras
+            await update.message.reply_text(f"❌ Erro: Colunas não encontradas: {colunas_faltando}\n\nColunas detectadas: [{lista_cols}...]")
             return
 
-        # Renomeia para o padrão interno e filtra
-        df = df[list(colunas_finais.values())].copy()
-        df.columns = list(colunas_finais.keys())
+        # Filtra e renomeia
+        df = df[list(mapeamento.keys())].copy()
+        df.rename(columns=mapeamento, inplace=True)
+
+        # 3. Limpeza Inicial: Remover EAN nulo
+        df.dropna(subset=['ean'], inplace=True)
         
-        # Limpeza e Normalização
-        df['EAN 1'] = df['EAN 1'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        df['SUBSTÂNCIA'] = df['SUBSTÂNCIA'].apply(normalize_text)
-        df['PRODUTO'] = df['PRODUTO'].apply(normalize_text)
-        df['LABORATÓRIO'] = df['LABORATÓRIO'].apply(normalize_text)
-        df['APRESENTAÇÃO'] = df['APRESENTAÇÃO'].apply(normalize_text)
-        df['TIPO DE PRODUTO'] = df['TIPO DE PRODUTO'].apply(normalize_type)
-        
-        # PMC: Tratamento robusto para números (converte 12,34 para 12.34)
+        # 4. Tratamento de Preço (Remover R$, trocar vírgula por ponto)
         def clean_price(val):
             if pd.isna(val): return 0.0
-            s_val = str(val).replace(',', '.').strip()
+            s_val = str(val).upper().replace('R$', '').replace(' ', '').strip()
+            # Tratamento para formato brasileiro: 1.250,50 -> 1250.50
+            if ',' in s_val:
+                s_val = s_val.replace('.', '').replace(',', '.')
             try:
                 return float(s_val)
             except:
                 return 0.0
 
-        df['PMC 20%'] = df['PMC 20%'].apply(clean_price)
+        df['preco'] = df['preco'].apply(clean_price)
+
+        # 5. Normalização e Limpeza de Strings (Title Case)
+        df['ean'] = df['ean'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        df['principio_ativo'] = df['principio_ativo'].apply(normalize_text)
+        df['nome_comercial'] = df['nome_comercial'].apply(normalize_text)
+        df['laboratorio'] = df['laboratorio'].apply(normalize_text)
+        df['apresentacao'] = df['apresentacao'].apply(normalize_text)
+        df['tipo'] = df['tipo'].apply(normalize_type)
 
         total_registros = len(df)
         batch_size = 1000
+        processados = 0
+        
+        await update.message.reply_text(f"📊 {total_registros} linhas válidas prontas para carga.")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        for i in range(0, total_registros, batch_size):
+            batch = df.iloc[i : i + batch_size]
+            dados_batch = [
+                (
+                    row['ean'], row['nome_comercial'], row['principio_ativo'], row['laboratorio'], 
+                    "", row['apresentacao'], float(row['preco']), row['tipo']
+                )
+                for _, row in batch.iterrows()
+            ]
+
+            cursor.executemany("""
+                INSERT INTO remedio (ean, nome_comercial, principio_ativo, laboratorio, dosagem, forma_farmaceutica, preco, tipo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ean) DO UPDATE SET 
+                preco=EXCLUDED.preco, 
+                nome_comercial=EXCLUDED.nome_comercial,
+                principio_ativo=EXCLUDED.principio_ativo,
+                laboratorio=EXCLUDED.laboratorio,
+                forma_farmaceutica=EXCLUDED.forma_farmaceutica,
+                tipo=EXCLUDED.tipo;
+            """, dados_batch)
+            
+            conn.commit()
+            processados += len(batch)
+            await update.message.reply_text(f"⏳ Processando: {processados}/{total_registros}...")
+
+        cursor.close()
+        conn.close()
+        await update.message.reply_text(f"✅ Carga Completa finalizada! {processados} registros processados.")
+
+    except Exception as e:
+        logging.error(f"Erro na carga completa: {e}")
+        await update.message.reply_text(f"❌ Erro crítico: {str(e)}")
         processados = 0
         
         conn = get_db_connection()
