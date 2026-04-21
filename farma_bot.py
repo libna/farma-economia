@@ -5,7 +5,6 @@ import pandas as pd
 from psycopg2 import extras
 from datetime import datetime
 from dotenv import load_dotenv
-from thefuzz import process, fuzz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 
@@ -43,6 +42,9 @@ def init_db():
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # Habilita busca por similaridade (Trigram)
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+
         # Tabela de Medicamentos (Schema ANVISA-Ready com limites expandidos)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS remedio (
@@ -112,53 +114,63 @@ def registrar_log(termo, resultado):
         logging.error(f"Erro ao registrar log: {e}")
 
 def buscar_remedio_inteligente(termo_usuario):
-    """Busca aproximada em nomes e princípios ativos."""
+    """Busca aproximada delegada ao banco via Trigram Similarity."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT nome_comercial FROM remedio WHERE tipo = 'REFERENCIA'")
-        nomes = [row[0] for row in cursor.fetchall()]
-        cursor.execute("SELECT DISTINCT principio_ativo FROM remedio")
-        principios = [row[0] for row in cursor.fetchall()]
+        
+        # O operador % usa o Trigram para encontrar similaridade
+        # A função similarity() retorna o quão perto as strings estão (0 a 1)
+        query = """
+            SELECT nome_comercial, similarity(nome_comercial, %s) as score
+            FROM remedio
+            WHERE nome_comercial % %s OR principio_ativo % %s
+            ORDER BY score DESC
+            LIMIT 1;
+        """
+        cursor.execute(query, (termo_usuario, termo_usuario, termo_usuario))
+        result = cursor.fetchone()
         cursor.close()
         conn.close()
-        
-        opcoes = list(set(nomes + principios))
-        if not opcoes: return None, False
-            
-        melhor_match, score = process.extractOne(termo_usuario, opcoes, scorer=fuzz.token_sort_ratio)
-        return (melhor_match, True) if score >= 85 else (melhor_match, False) if score >= 60 else (None, False)
+
+        if result:
+            nome_encontrado, score = result
+            # Se o score for > 0.8 consideramos exato, > 0.3 sugerimos
+            return (nome_encontrado, True if score > 0.8 else False) if score > 0.3 else (None, False)
+        return None, False
     except Exception as e:
-        logging.error(f"Erro na busca: {e}")
+        logging.error(f"Erro na busca SQL: {e}")
         return None, False
 
 async def realizar_comparacao_e_enviar(update_or_query, termo_correto):
-    """Busca por Nome ou Princípio, garantindo comparação de mesma dosagem e forma."""
+    """Busca por Nome ou Princípio, priorizando Referência mas aceitando o mais caro como base."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=extras.DictCursor)
         
-        # 1. Busca Referência (por Nome Comercial ou Princípio Ativo)
+        # 1. Busca o produto mais 'relevante' (Referência primeiro, se não houver, o mais caro)
         cursor.execute("""
             SELECT * FROM remedio 
-            WHERE (nome_comercial = %s OR principio_ativo = %s) AND tipo = 'REFERENCIA' 
+            WHERE (nome_comercial ILIKE %s OR principio_ativo ILIKE %s)
+            ORDER BY (tipo = 'REFERENCIA') DESC, preco DESC 
             LIMIT 1
-        """, (termo_correto, termo_correto))
+        """, (f"%{termo_correto}%", f"%{termo_correto}%"))
         ref = cursor.fetchone()
         
         if not ref:
-            msg = f"Encontrei '{termo_correto}', mas não temos um medicamento de referência correspondente."
+            msg = f"Poxa, não encontrei dados suficientes para comparar '{termo_correto}'."
             registrar_log(termo_correto, "NÃO ENCONTRADO")
             if isinstance(update_or_query, Update): await update_or_query.message.reply_text(msg)
             else: await update_or_query.edit_message_text(msg)
             return
 
-        # 2. Busca o Genérico mais barato com MESMA DOSAGEM E FORMA
+        # 2. Busca o Genérico mais barato com MESMA APRESENTAÇÃO
+        # Note: 'dosagem' pode estar vazia agora, usamos 'forma_farmaceutica' (apresentação)
         cursor.execute("""
             SELECT nome_comercial, preco, laboratorio FROM remedio 
-            WHERE principio_ativo = %s AND dosagem = %s AND forma_farmaceutica = %s AND tipo = 'GENERICO'
+            WHERE principio_ativo = %s AND forma_farmaceutica = %s AND tipo = 'GENERICO'
             ORDER BY preco ASC LIMIT 1
-        """, (ref['principio_ativo'], ref['dosagem'], ref['forma_farmaceutica']))
+        """, (ref['principio_ativo'], ref['forma_farmaceutica']))
         gen = cursor.fetchone()
         
         cursor.close()
