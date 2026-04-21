@@ -267,30 +267,69 @@ async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text("🚀 Iniciando processamento do arquivo ANVISA... Isso pode demorar.")
 
     try:
-        # Tenta ler o Excel procurando as colunas necessárias (pode precisar de skiprows se houver cabeçalho da ANVISA)
+        # Mapeamento esperado vs Real no Excel
+        mapeamento = {
+            'EAN 1': ['EAN 1', 'EAN1', 'CODIGO EAN'],
+            'SUBSTÂNCIA': ['SUBSTÂNCIA', 'SUBSTANCIA', 'PRINCIPIO ATIVO', 'PRINCÍPIO ATIVO'],
+            'PRODUTO': ['PRODUTO', 'NOME COMERCIAL', 'NOME DO PRODUTO'],
+            'LABORATÓRIO': ['LABORATÓRIO', 'LABORATORIO', 'FABRICANTE'],
+            'APRESENTAÇÃO': ['APRESENTAÇÃO', 'APRESENTACAO', 'EMBALAGEM'],
+            'TIPO DE PRODUTO': ['TIPO DE PRODUTO', 'TIPO', 'CATEGORIA'],
+            'PMC 20%': ['PMC 20%', 'PMC 20', 'PREÇO MÁXIMO AO CONSUMIDOR 20%', 'PMC_20']
+        }
+
         df = None
-        colunas_necessarias = ['EAN 1', 'SUBSTÂNCIA', 'PRODUTO', 'LABORATÓRIO', 'APRESENTAÇÃO', 'TIPO DE PRODUTO', 'PMC 20%']
+        colunas_finais = {}
         
         # Tentativa inteligente de encontrar o cabeçalho (pula até 60 linhas de lixo da ANVISA)
         for i in range(0, 60):
-            temp_df = pd.read_excel(caminho_arquivo, skiprows=i)
-            if all(col in temp_df.columns for col in colunas_necessarias):
-                df = temp_df
+            temp_df = pd.read_excel(caminho_arquivo, skiprows=i, nrows=5) # Lê apenas o topo para validar
+            cols_atuais = [str(c).strip().upper() for c in temp_df.columns]
+            
+            temp_map = {}
+            for original, variantes in mapeamento.items():
+                for v in variantes:
+                    if v.upper() in cols_atuais:
+                        # Encontra o nome exato da coluna no DF original
+                        idx = cols_atuais.index(v.upper())
+                        temp_map[original] = temp_df.columns[idx]
+                        break
+            
+            # Se encontrou todas as colunas essenciais
+            if len(temp_map) == len(mapeamento):
+                df = pd.read_excel(caminho_arquivo, skiprows=i)
+                colunas_finais = temp_map
                 break
         
         if df is None:
-            await update.message.reply_text("❌ Erro: Não foi possível encontrar as colunas esperadas no Excel.")
+            # Diagnóstico para o usuário
+            temp_lixo = pd.read_excel(caminho_arquivo, nrows=5)
+            lista_cols = ", ".join([str(c) for c in temp_lixo.columns])
+            await update.message.reply_text(f"❌ Erro: Colunas não encontradas.\n\nColunas detectadas no topo do arquivo: [{lista_cols}]\n\nPor favor, verifique se o arquivo segue o padrão da ANVISA.")
             return
 
-        # Filtra e limpa
-        df = df[colunas_necessarias].copy()
-        df['EAN 1'] = df['EAN 1'].astype(str).str.replace(r'\.0$', '', regex=True)
+        # Renomeia para o padrão interno e filtra
+        df = df[list(colunas_finais.values())].copy()
+        df.columns = list(colunas_finais.keys())
+        
+        # Limpeza e Normalização
+        df['EAN 1'] = df['EAN 1'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df['SUBSTÂNCIA'] = df['SUBSTÂNCIA'].apply(normalize_text)
         df['PRODUTO'] = df['PRODUTO'].apply(normalize_text)
         df['LABORATÓRIO'] = df['LABORATÓRIO'].apply(normalize_text)
         df['APRESENTAÇÃO'] = df['APRESENTAÇÃO'].apply(normalize_text)
         df['TIPO DE PRODUTO'] = df['TIPO DE PRODUTO'].apply(normalize_type)
-        df['PMC 20%'] = pd.to_numeric(df['PMC 20%'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0.0)
+        
+        # PMC: Tratamento robusto para números (converte 12,34 para 12.34)
+        def clean_price(val):
+            if pd.isna(val): return 0.0
+            s_val = str(val).replace(',', '.').strip()
+            try:
+                return float(s_val)
+            except:
+                return 0.0
+
+        df['PMC 20%'] = df['PMC 20%'].apply(clean_price)
 
         total_registros = len(df)
         batch_size = 1000
