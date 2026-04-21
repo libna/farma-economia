@@ -16,6 +16,13 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# DEBUG: Verifica se a URL do banco está chegando (Mostra apenas os primeiros 10 caracteres)
+db_url_debug = os.getenv("DATABASE_URL")
+if db_url_debug:
+    print(f"DEBUG: DATABASE_URL detectada: {db_url_debug[:10]}...")
+else:
+    print("DEBUG: DATABASE_URL NÃO detectada nas variáveis de ambiente!")
+
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 def get_db_connection():
