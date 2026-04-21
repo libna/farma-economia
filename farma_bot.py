@@ -133,10 +133,16 @@ def buscar_remedio_inteligente(termo_usuario):
         cursor.close()
         conn.close()
 
-        if result:
+        # Correção: Verificação explícita do resultado para evitar 'tuple index out of range'
+        if result and len(result) >= 2:
             nome_encontrado, score = result
             # Se o score for > 0.8 consideramos exato, > 0.3 sugerimos
-            return (nome_encontrado, True if score > 0.8 else False) if score > 0.3 else (None, False)
+            if score > 0.3:
+                return (nome_encontrado, True if score > 0.8 else False)
+        
+        return None, False
+    except IndexError as e:
+        logging.error(f"Erro de índice na busca. Resultado: {result} | Erro: {e}")
         return None, False
     except Exception as e:
         logging.error(f"Erro na busca SQL: {e}")
