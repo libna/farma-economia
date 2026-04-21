@@ -16,6 +16,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # DEBUG: Verificação de Ambiente
 db_url_debug = os.getenv("DATABASE_URL")
@@ -120,7 +121,6 @@ def buscar_remedio_inteligente(termo_usuario):
         cursor = conn.cursor()
         
         # O operador % usa o Trigram para encontrar similaridade
-        # A função similarity() retorna o quão perto as strings estão (0 a 1)
         query = """
             SELECT nome_comercial, similarity(nome_comercial, %s) as score
             FROM remedio
@@ -133,17 +133,21 @@ def buscar_remedio_inteligente(termo_usuario):
         cursor.close()
         conn.close()
 
-        # Correção: Verificação explícita do resultado para evitar 'tuple index out of range'
-        if result and len(result) >= 2:
-            nome_encontrado, score = result
-            # Se o score for > 0.8 consideramos exato, > 0.3 sugerimos
-            if score > 0.3:
-                return (nome_encontrado, True if score > 0.8 else False)
+        # Verificação de segurança: se não houver match, result é None
+        if result is None:
+            return None, False
+            
+        nome_encontrado = result[0]
+        score = result[1]
         
-        return None, False
-    except IndexError as e:
-        logging.error(f"Erro de índice na busca. Resultado: {result} | Erro: {e}")
-        return None, False
+        # Thresholds: >0.8 match exato | >=0.4 sugestão | <0.4 ignora
+        if score > 0.8:
+            return (nome_encontrado, True)
+        elif score >= 0.4:
+            return (nome_encontrado, False)
+        else:
+            return None, False
+
     except Exception as e:
         logging.error(f"Erro na busca SQL: {e}")
         return None, False
