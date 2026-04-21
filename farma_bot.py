@@ -2,134 +2,88 @@ import logging
 import os
 import psycopg2
 from psycopg2 import extras
+from datetime import datetime
 from dotenv import load_dotenv
 from thefuzz import process, fuzz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CallbackQueryHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 
-# Carrega variáveis de ambiente do arquivo .env
+# Carrega variáveis de ambiente
 load_dotenv()
 
-# Configuração de Logs
+# Configuração de Logs de Sistema
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-# DEBUG: Verifica se a URL do banco está chegando (Mostra apenas os primeiros 10 caracteres)
+# DEBUG: Verificação de Ambiente
 db_url_debug = os.getenv("DATABASE_URL")
 if db_url_debug:
     print(f"DEBUG: DATABASE_URL detectada: {db_url_debug[:10]}...")
 else:
-    print("DEBUG: DATABASE_URL NÃO detectada nas variáveis de ambiente!")
+    print("DEBUG: DATABASE_URL NÃO detectada!")
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
 
 def get_db_connection():
-    """Cria e retorna uma conexão com o banco de dados PostgreSQL com suporte ao Railway."""
+    """Conexão resiliente com suporte ao Railway/Postgres."""
     url = os.getenv("DATABASE_URL")
     if not url:
-        raise ValueError("A variável DATABASE_URL não foi encontrada nas variáveis de ambiente!")
-    
-    # O Railway às vezes fornece urls começando com postgres:// 
-    # mas o driver moderno prefere postgresql://
+        raise ValueError("DATABASE_URL não configurada!")
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
-        
     return psycopg2.connect(url, sslmode='require')
 
 def init_db():
-    """Cria a tabela e popula com a Super Lista caso o banco esteja vazio (PostgreSQL)."""
+    """Cria o Schema Profissional e popula a lista inicial."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # DDL no padrão Postgres
+        # Tabela de Medicamentos (Schema ANVISA-Ready)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS remedio (
-                id SERIAL PRIMARY KEY,
-                nome VARCHAR(255),
+                ean VARCHAR(13) PRIMARY KEY,
+                nome_comercial VARCHAR(255),
                 principio_ativo VARCHAR(255),
-                tipo VARCHAR(50),
-                apresentacao VARCHAR(255),
-                preco DECIMAL(10,2)
+                laboratorio VARCHAR(255),
+                dosagem VARCHAR(100),
+                forma_farmaceutica VARCHAR(100),
+                preco DECIMAL(10,2),
+                tipo VARCHAR(50)
+            )
+        ''')
+
+        # Tabela de Logs (Business Intelligence)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS logs_busca (
+                id SERIAL PRIMARY KEY,
+                termo_usuario TEXT,
+                resultado_encontrado TEXT,
+                data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         conn.commit()
 
-        # Verifica se já existem dados
+        # Carga Inicial Estratégica
         cursor.execute("SELECT COUNT(*) FROM remedio")
         if cursor.fetchone()[0] == 0:
-            logging.info("Populando banco de dados com a Super Lista estratégica...")
-            
-            # Super Lista Estratégica Completa
+            logging.info("Iniciando Carga Inicial Profissional...")
             dados = [
-                # ADIÇÃO ESPECIAL PARA SUA AMIGA
-                ('Rocaltrol', 'Calcitriol', 'REFERENCIA', '0.25mcg capsula', 115.00),
-                ('Calcitriol Sigman Pharma', 'Calcitriol', 'GENERICO', '0.25mcg capsula', 58.00),
-                ('Calcitriol Eurofarma', 'Calcitriol', 'GENERICO', '0.25mcg capsula', 54.50),
-
-                # ANALGÉSICOS E ANTI-INFLAMATÓRIOS
-                ('Buscofem', 'Ibuprofeno', 'REFERENCIA', '400mg capsula', 25.50),
-                ('Ibuprofeno Medley', 'Ibuprofeno', 'GENERICO', '400mg capsula', 12.90),
-                ('Ibuprofeno EMS', 'Ibuprofeno', 'GENERICO', '400mg capsula', 10.50),
-                ('Advil', 'Ibuprofeno', 'REFERENCIA', '400mg capsula', 28.00),
-                ('Tylenol', 'Paracetamol', 'REFERENCIA', '500mg comprimido', 18.00),
-                ('Paracetamol Neo Química', 'Paracetamol', 'GENERICO', '500mg comprimido', 8.50),
-                ('Novalgina', 'Dipirona', 'REFERENCIA', '500mg comprimido', 22.00),
-                ('Dipirona Eurofarma', 'Dipirona', 'GENERICO', '500mg comprimido', 7.90),
-                ('Dorflex', 'Dipirona', 'SIMILAR', '500mg comprimido', 15.00),
-                ('Cataflam', 'Diclofenaco Potassico', 'REFERENCIA', '50mg comprimido', 35.00),
-                ('Diclofenaco Potassico EMS', 'Diclofenaco Potassico', 'GENERICO', '50mg comprimido', 14.00),
-                ('Voltaren', 'Diclofenaco Sodico', 'REFERENCIA', '50mg comprimido', 32.00),
-                ('Diclofenaco Sodico Medley', 'Diclofenaco Sodico', 'GENERICO', '50mg comprimido', 12.50),
-
-                # ALERGIA E GRIPE
-                ('Allegra', 'Fexofenadina', 'REFERENCIA', '120mg comprimido', 55.00),
-                ('Fexofenadina EMS', 'Fexofenadina', 'GENERICO', '120mg comprimido', 28.00),
-                ('Claritin', 'Loratadina', 'REFERENCIA', '10mg comprimido', 42.00),
-                ('Loratadina Medley', 'Loratadina', 'GENERICO', '10mg comprimido', 15.50),
-                ('Zyrtec', 'Cetirizina', 'REFERENCIA', '10mg comprimido', 50.00),
-                ('Cetirizina Medley', 'Cetirizina', 'GENERICO', '10mg comprimido', 22.00),
-
-                # ESTÔMAGO E DIGESTÃO
-                ('Buscopan Composto', 'Escopolamina', 'REFERENCIA', 'comprimido', 24.00),
-                ('Escopolamina Neo Quimica', 'Escopolamina', 'GENERICO', 'comprimido', 11.00),
-                ('Nexium', 'Esomeprazol', 'REFERENCIA', '40mg comprimido', 95.00),
-                ('Esomeprazol Medley', 'Esomeprazol', 'GENERICO', '40mg comprimido', 45.00),
-                ('PantoCalm', 'Pantoprazol', 'REFERENCIA', '40mg comprimido', 60.00),
-                ('Pantoprazol Eurofarma', 'Pantoprazol', 'GENERICO', '40mg comprimido', 22.00),
-                ('Luftal', 'Simeticona', 'REFERENCIA', '75mg gotas', 26.00),
-                ('Simeticona Medley', 'Simeticona', 'GENERICO', '75mg gotas', 12.00),
-
-                # PRESSÃO E CORAÇÃO (Uso Contínuo)
-                ('Aradois', 'Losartana Potassica', 'REFERENCIA', '50mg comprimido', 45.00),
-                ('Losartana Potassica Medley', 'Losartana Potassica', 'GENERICO', '50mg comprimido', 15.00),
-                ('Selozok', 'Metoprolol', 'REFERENCIA', '50mg comprimido', 65.00),
-                ('Metoprolol EMS', 'Metoprolol', 'GENERICO', '50mg comprimido', 32.00),
-                ('Diovan', 'Valsartana', 'REFERENCIA', '160mg comprimido', 110.00),
-                ('Valsartana Medley', 'Valsartana', 'GENERICO', '160mg comprimido', 48.00),
-
-                # COLESTEROL E DIABETES
-                ('Lipitor', 'Atorvastatina', 'REFERENCIA', '20mg comprimido', 140.00),
-                ('Atorvastatina Medley', 'Atorvastatina', 'GENERICO', '20mg comprimido', 45.00),
-                ('Crestor', 'Rosuvastatina', 'REFERENCIA', '10mg comprimido', 115.00),
-                ('Rosuvastatina Medley', 'Rosuvastatina', 'GENERICO', '10mg comprimido', 38.00),
-                ('Glifage XR', 'Metformina', 'REFERENCIA', '500mg comprimido', 20.00),
-                ('Metformina Germed', 'Metformina', 'GENERICO', '500mg comprimido', 8.00),
-
-                # ANTIBIÓTICOS E OUTROS
-                ('Amoxil', 'Amoxicilina', 'REFERENCIA', '500mg capsula', 48.00),
-                ('Amoxicilina EMS', 'Amoxicilina', 'GENERICO', '500mg capsula', 19.90),
-                ('Astro', 'Azitromicina', 'REFERENCIA', '500mg comprimido', 35.00),
-                ('Azitromicina Medley', 'Azitromicina', 'GENERICO', '500mg comprimido', 16.00),
-                ('Puran T4', 'Levotiroxina', 'REFERENCIA', '50mcg comprimido', 22.00),
-                ('Levotiroxina Generica', 'Levotiroxina', 'GENERICO', '50mcg comprimido', 14.00)
+                # EAN | Nome | Principio | Lab | Dosagem | Forma | Preco | Tipo
+                ('7891058021301', 'Rocaltrol', 'Calcitriol', 'Roche', '0.25mcg', 'Capsula Mole', 115.00, 'REFERENCIA'),
+                ('7896004719222', 'Calcitriol Sigman', 'Calcitriol', 'Sigman Pharma', '0.25mcg', 'Capsula Mole', 58.00, 'GENERICO'),
+                ('7891317449212', 'Buscofem', 'Ibuprofeno', 'Boehringer', '400mg', 'Capsula Mole', 25.50, 'REFERENCIA'),
+                ('7896004724110', 'Ibuprofeno EMS', 'Ibuprofeno', 'EMS', '400mg', 'Capsula Mole', 10.50, 'GENERICO'),
+                ('7891058001105', 'Tylenol', 'Paracetamol', 'Janssen', '500mg', 'Comprimido', 18.00, 'REFERENCIA'),
+                ('7896714214224', 'Paracetamol Neo', 'Paracetamol', 'Neo Química', '500mg', 'Comprimido', 8.50, 'GENERICO'),
+                ('7896004702118', 'Novalgina', 'Dipirona', 'Sanofi', '500mg', 'Comprimido', 22.00, 'REFERENCIA'),
+                ('7896714201118', 'Dipirona Euro', 'Dipirona', 'Eurofarma', '500mg', 'Comprimido', 7.90, 'GENERICO')
             ]
-
-            # Inserção em massa no Postgres
             cursor.executemany(
-                'INSERT INTO remedio (nome, principio_ativo, tipo, apresentacao, preco) VALUES (%s, %s, %s, %s, %s)',
+                'INSERT INTO remedio (ean, nome_comercial, principio_ativo, laboratorio, dosagem, forma_farmaceutica, preco, tipo) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
                 dados
             )
             conn.commit()
@@ -137,154 +91,160 @@ def init_db():
         cursor.close()
         conn.close()
     except Exception as e:
-        logging.error(f"Erro ao inicializar banco: {e}")
+        logging.error(f"Erro no init_db: {e}")
 
-def buscar_remedio_inteligente(termo_usuario):
-    """Busca aproximada considerando Nome Comercial e Princípio Ativo (Postgres)."""
+def registrar_log(termo, resultado):
+    """Registra a busca para análise de mercado futura."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        cursor.execute("SELECT DISTINCT nome FROM remedio WHERE tipo = 'REFERENCIA'")
+        cursor.execute("INSERT INTO logs_busca (termo_usuario, resultado_encontrado) VALUES (%s, %s)", (termo, resultado))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Erro ao registrar log: {e}")
+
+def buscar_remedio_inteligente(termo_usuario):
+    """Busca aproximada em nomes e princípios ativos."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT nome_comercial FROM remedio WHERE tipo = 'REFERENCIA'")
         nomes = [row[0] for row in cursor.fetchall()]
-        
         cursor.execute("SELECT DISTINCT principio_ativo FROM remedio")
         principios = [row[0] for row in cursor.fetchall()]
-        
         cursor.close()
         conn.close()
         
         opcoes = list(set(nomes + principios))
-        if not opcoes:
-            return None, False
+        if not opcoes: return None, False
             
         melhor_match, score = process.extractOne(termo_usuario, opcoes, scorer=fuzz.token_sort_ratio)
-        
-        if score >= 85:
-            return melhor_match, True
-        elif score >= 60:
-            return melhor_match, False
-        else:
-            return None, False
+        return (melhor_match, True) if score >= 85 else (melhor_match, False) if score >= 60 else (None, False)
     except Exception as e:
-        logging.error(f"Erro na busca inteligente: {e}")
+        logging.error(f"Erro na busca: {e}")
         return None, False
 
 async def realizar_comparacao_e_enviar(update_or_query, termo_correto):
-    """Busca o medicamento de referência e o genérico mais barato (Postgres)."""
+    """Busca por Nome ou Princípio, garantindo comparação de mesma dosagem e forma."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=extras.DictCursor)
         
-        # 1. Tenta buscar como Nome Comercial de Referência
-        cursor.execute("SELECT nome, principio_ativo, tipo, apresentacao, preco FROM remedio WHERE nome = %s AND tipo = 'REFERENCIA'", (termo_correto,))
-        res = cursor.fetchone()
+        # 1. Busca Referência (por Nome Comercial ou Princípio Ativo)
+        cursor.execute("""
+            SELECT * FROM remedio 
+            WHERE (nome_comercial = %s OR principio_ativo = %s) AND tipo = 'REFERENCIA' 
+            LIMIT 1
+        """, (termo_correto, termo_correto))
+        ref = cursor.fetchone()
         
-        # 2. Se não achou, tenta buscar como Princípio Ativo
-        if not res:
-            cursor.execute("SELECT nome, principio_ativo, tipo, apresentacao, preco FROM remedio WHERE principio_ativo = %s AND tipo = 'REFERENCIA' LIMIT 1", (termo_correto,))
-            res = cursor.fetchone()
-
-        if not res:
-            msg = f"Encontrei '{termo_correto}', mas não temos um medicamento de referência correspondente na base."
-            cursor.close()
-            conn.close()
-            if isinstance(update_or_query, Update):
-                await update_or_query.message.reply_text(msg)
-            else:
-                await update_or_query.edit_message_text(msg)
+        if not ref:
+            msg = f"Encontrei '{termo_correto}', mas não temos um medicamento de referência correspondente."
+            registrar_log(termo_correto, "NÃO ENCONTRADO")
+            if isinstance(update_or_query, Update): await update_or_query.message.reply_text(msg)
+            else: await update_or_query.edit_message_text(msg)
             return
 
-        nome_ref, principio, tipo, apresentacao, preco_ref = res['nome'], res['principio_ativo'], res['tipo'], res['apresentacao'], res['preco']
-
-        # Busca genérico mais barato
+        # 2. Busca o Genérico mais barato com MESMA DOSAGEM E FORMA
         cursor.execute("""
-            SELECT nome, preco FROM remedio 
-            WHERE principio_ativo = %s AND apresentacao = %s AND tipo = 'GENERICO'
+            SELECT nome_comercial, preco, laboratorio FROM remedio 
+            WHERE principio_ativo = %s AND dosagem = %s AND forma_farmaceutica = %s AND tipo = 'GENERICO'
             ORDER BY preco ASC LIMIT 1
-        """, (principio, apresentacao))
+        """, (ref['principio_ativo'], ref['dosagem'], ref['forma_farmaceutica']))
+        gen = cursor.fetchone()
         
-        generico = cursor.fetchone()
         cursor.close()
         conn.close()
-        
-        if not generico:
-            msg = f"🔍 Resultado para {nome_ref} (R$ {float(preco_ref):.2f}):\n\nInfelizmente não temos genéricos cadastrados para {principio} ({apresentacao}) no momento."
-            if isinstance(update_or_query, Update):
-                await update_or_query.message.reply_text(msg)
-            else:
-                await update_or_query.edit_message_text(msg)
-            return
 
-        nome_gen, preco_gen = generico['nome'], generico['preco']
-        economia_reais = float(preco_ref) - float(preco_gen)
-        economia_percent = (economia_reais / float(preco_ref)) * 100
+        res_log = f"{ref['nome_comercial']} -> {gen['nome_comercial'] if gen else 'SEM GENERICO'}"
+        registrar_log(termo_correto, res_log)
 
-        resposta = (
-            f"🔍 Resultado para {nome_ref} (R$ {float(preco_ref):.2f}):\n\n"
-            f"✅ Encontrei uma opção mais barata!\n"
-            f"💊 {nome_gen} (Genérico)\n"
-            f"💰 Preço: R$ {float(preco_gen):.2f}\n"
-            f"📉 Economia de: R$ {economia_reais:.2f} ({economia_percent:.1f}%)"
-        )
-        
-        if isinstance(update_or_query, Update):
-            await update_or_query.message.reply_text(resposta, reply_markup=ReplyKeyboardRemove())
+        header = f"🔍 {ref['nome_comercial']} ({ref['laboratorio']})\n💊 {ref['dosagem']} | {ref['forma_farmaceutica']}\n💰 R$ {float(ref['preco']):.2f}"
+
+        if not gen:
+            resposta = f"{header}\n\n⚠️ Não encontramos genéricos para esta apresentação no momento."
         else:
-            await update_or_query.edit_message_text(resposta)
+            economia_r = float(ref['preco']) - float(gen['preco'])
+            economia_p = (economia_r / float(ref['preco'])) * 100
+            resposta = (
+                f"{header}\n\n"
+                f"✅ Opção mais barata encontrada:\n"
+                f"💊 {gen['nome_comercial']} ({gen['laboratorio']})\n"
+                f"💰 Preço: R$ {float(gen['preco']):.2f}\n"
+                f"📉 Economia de: R$ {economia_r:.2f} ({economia_p:.1f}%)"
+            )
+        
+        if isinstance(update_or_query, Update): await update_or_query.message.reply_text(resposta, reply_markup=ReplyKeyboardRemove())
+        else: await update_or_query.edit_message_text(resposta)
             
     except Exception as e:
-        logging.error(f"Erro na comparação de preços: {e}")
-        msg = "Ocorreu um erro técnico ao processar sua solicitação."
-        if isinstance(update_or_query, Update):
-            await update_or_query.message.reply_text(msg)
-        else:
-            await update_or_query.edit_message_text(msg)
+        logging.error(f"Erro na comparação: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text.strip()
-    
     nome_correto, exato = buscar_remedio_inteligente(user_text)
     
     if not nome_correto:
-        await update.message.reply_text(f"Poxa, ainda não temos o medicamento ou princípio '{user_text}' em nossa base. 😕")
+        await update.message.reply_text(f"Poxa, ainda não temos '{user_text}' em nossa base. 😕")
+        registrar_log(user_text, "DESCONHECIDO")
         return
 
     if exato:
         await realizar_comparacao_e_enviar(update, nome_correto)
     else:
-        # Sugestão com botões Inline
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Sim", callback_data=f"sim_{nome_correto}"),
-                InlineKeyboardButton("❌ Não", callback_data="nao")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            f"Você quis dizer '{nome_correto}'?",
-            reply_markup=reply_markup
-        )
+        keyboard = [[InlineKeyboardButton("✅ Sim", callback_data=f"sim_{nome_correto}"), InlineKeyboardButton("❌ Não", callback_data="nao")]]
+        await update.message.reply_text(f"Você quis dizer '{nome_correto}'?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     if query.data.startswith("sim_"):
-        termo_sugerido = query.data.split("sim_")[1]
-        await realizar_comparacao_e_enviar(query, termo_sugerido)
+        await realizar_comparacao_e_enviar(query, query.data.split("sim_")[1])
     else:
-        await query.edit_message_text("Tudo bem! Tente digitar o nome comercial ou o princípio ativo novamente. 💊")
+        await query.edit_message_text("Tudo bem! Tente pesquisar novamente. 💊")
+
+async def comando_carga(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando administrativo para carga em lote via EAN."""
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        await update.message.reply_text("⛔ Acesso negado. Apenas o administrador pode realizar cargas.")
+        return
+
+    linhas = update.message.text.split('\n')[1:] # Ignora a primeira linha (/carga)
+    if not linhas:
+        await update.message.reply_text("Formato: /carga\nEAN | Nome | Principio | Lab | Dosagem | Forma | Preco | Tipo")
+        return
+
+    sucesso, erro = 0, 0
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    for linha in linhas:
+        try:
+            parts = [p.strip() for p in linha.split('|')]
+            if len(parts) < 8: continue
+            
+            # UPSERT: Insere ou atualiza caso o EAN já exista
+            cursor.execute("""
+                INSERT INTO remedio (ean, nome_comercial, principio_ativo, laboratorio, dosagem, forma_farmaceutica, preco, tipo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ean) DO UPDATE SET 
+                nome_comercial=EXCLUDED.nome_comercial, preco=EXCLUDED.preco;
+            """, parts)
+            sucesso += 1
+        except Exception: erro += 1
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+    await update.message.reply_text(f"✅ Carga finalizada!\nSucesso: {sucesso}\nErros: {erro}")
 
 if __name__ == '__main__':
-    # Inicialização do Banco de Dados no Postgres
     init_db()
-
     application = ApplicationBuilder().token(TOKEN).build()
-
-    # Handlers
+    application.add_handler(CommandHandler("carga", comando_carga))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
-
-    print("FarmaBot rodando no modo de produção com suporte a Railway (PostgreSQL)...")
+    print("FarmaBot PRO iniciado...")
     application.run_polling()
