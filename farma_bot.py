@@ -259,61 +259,53 @@ async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("⛔ Acesso negado.")
         return
 
-    # Procura pelo arquivo default ou o específico anterior
     arquivo_default = "data/lista_anvisa.xlsx"
     caminho_arquivo = arquivo_default if os.path.exists(arquivo_default) else "data/xls_conformidade_site_20260416_151911506.xlsx"
 
     if not os.path.exists(caminho_arquivo):
-        await update.message.reply_text(f"❌ Erro: Arquivo {caminho_arquivo} não encontrado em /data.")
+        await update.message.reply_text(f"❌ Erro: Arquivo {caminho_arquivo} não encontrado.")
         return
 
-    await update.message.reply_text(f"🚀 Iniciando processamento de {os.path.basename(caminho_arquivo)}...\nLendo com skiprows=41.")
+    await update.message.reply_text(f"🚀 Iniciando processamento de {os.path.basename(caminho_arquivo)}...")
 
     try:
-        # 1. Leitura Precisa com skiprows
+        # 1. Leitura e Limpeza de Cabeçalho (skiprows=41 e normalização)
         df = pd.read_excel(caminho_arquivo, skiprows=41)
-        logging.info(f"Linhas lidas após skiprows: {len(df)}")
+        df.columns = df.columns.str.strip().str.replace(r'\s+', ' ', regex=True).str.upper()
+        logging.info(f"Colunas após limpeza: {df.columns.tolist()}")
         
-        # 2. Mapeamento de Colunas (Case Sensitive)
+        # 2. Mapeamento Atualizado (Normalizado)
         mapeamento = {
             'EAN 1': 'ean',
             'SUBSTÂNCIA': 'principio_ativo',
             'PRODUTO': 'nome_comercial',
             'LABORATÓRIO': 'laboratorio',
             'APRESENTAÇÃO': 'apresentacao',
-            'PMC 20%': 'preco',
+            'PMC 20 %': 'preco',
             'TIPO DE PRODUTO (STATUS DO PRODUTO)': 'tipo'
         }
 
-        # Verifica se as colunas existem
+        # Verifica colunas
         colunas_faltando = [col for col in mapeamento.keys() if col not in df.columns]
         if colunas_faltando:
-            lista_cols = ", ".join([str(c) for c in df.columns[:15]]) # Mostra as 15 primeiras
-            await update.message.reply_text(f"❌ Erro: Colunas não encontradas: {colunas_faltando}\n\nColunas detectadas: [{lista_cols}...]")
+            lista_cols = ", ".join(df.columns.tolist())
+            await update.message.reply_text(f"❌ Erro: Colunas não encontradas: {colunas_faltando}\n\nColunas detectadas: [{lista_cols}]")
             return
 
         # Filtra e renomeia
         df = df[list(mapeamento.keys())].copy()
         df.rename(columns=mapeamento, inplace=True)
 
-        # 3. Limpeza Inicial: Remover EAN nulo
+        # 3. Limpeza: Remover EAN nulo
         df.dropna(subset=['ean'], inplace=True)
         
-        # 4. Tratamento de Preço (Remover R$, trocar vírgula por ponto)
-        def clean_price(val):
-            if pd.isna(val): return 0.0
-            s_val = str(val).upper().replace('R$', '').replace(' ', '').strip()
-            # Tratamento para formato brasileiro: 1.250,50 -> 1250.50
-            if ',' in s_val:
-                s_val = s_val.replace('.', '').replace(',', '.')
-            try:
-                return float(s_val)
-            except:
-                return 0.0
+        # 4. Conversão de Preço (Tratamento de vírgula para ponto)
+        # Garante string, remove possíveis R$ ou espaços, remove separador de milhar (ponto) e troca vírgula por ponto
+        df['preco'] = df['preco'].astype(str).str.replace('R$', '', regex=False).str.strip()
+        df['preco'] = df['preco'].str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+        df['preco'] = pd.to_numeric(df['preco'], errors='coerce').fillna(0.0)
 
-        df['preco'] = df['preco'].apply(clean_price)
-
-        # 5. Normalização e Limpeza de Strings (Title Case)
+        # 5. Normalização de Dados
         df['ean'] = df['ean'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df['principio_ativo'] = df['principio_ativo'].apply(normalize_text)
         df['nome_comercial'] = df['nome_comercial'].apply(normalize_text)
@@ -325,7 +317,7 @@ async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_T
         batch_size = 1000
         processados = 0
         
-        await update.message.reply_text(f"📊 {total_registros} linhas válidas prontas para carga.")
+        await update.message.reply_text(f"📊 {total_registros} registros válidos encontrados. Iniciando carga...")
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -358,45 +350,7 @@ async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_T
 
         cursor.close()
         conn.close()
-        await update.message.reply_text(f"✅ Carga Completa finalizada! {processados} registros processados.")
-
-    except Exception as e:
-        logging.error(f"Erro na carga completa: {e}")
-        await update.message.reply_text(f"❌ Erro crítico: {str(e)}")
-        processados = 0
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        for i in range(0, total_registros, batch_size):
-            batch = df.iloc[i : i + batch_size]
-            dados_batch = [
-                (
-                    row['EAN 1'], row['PRODUTO'], row['SUBSTÂNCIA'], row['LABORATÓRIO'], 
-                    "", row['APRESENTAÇÃO'], float(row['PMC 20%']), row['TIPO DE PRODUTO']
-                )
-                for _, row in batch.iterrows()
-            ]
-
-            cursor.executemany("""
-                INSERT INTO remedio (ean, nome_comercial, principio_ativo, laboratorio, dosagem, forma_farmaceutica, preco, tipo)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ean) DO UPDATE SET 
-                preco=EXCLUDED.preco, 
-                nome_comercial=EXCLUDED.nome_comercial,
-                principio_ativo=EXCLUDED.principio_ativo,
-                laboratorio=EXCLUDED.laboratorio,
-                forma_farmaceutica=EXCLUDED.forma_farmaceutica,
-                tipo=EXCLUDED.tipo;
-            """, dados_batch)
-            
-            conn.commit()
-            processados += len(batch)
-            await update.message.reply_text(f"⏳ Processando: {processados}/{total_registros}...")
-
-        cursor.close()
-        conn.close()
-        await update.message.reply_text(f"✅ Carga Completa finalizada! {processados} medicamentos processados/atualizados.")
+        await update.message.reply_text(f"✅ Carga finalizada com sucesso! {processados} medicamentos processados.")
 
     except Exception as e:
         logging.error(f"Erro na carga completa: {e}")
