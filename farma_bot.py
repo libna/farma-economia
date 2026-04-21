@@ -3,8 +3,8 @@ import sqlite3
 import os
 from dotenv import load_dotenv
 from thefuzz import process, fuzz
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
 # Carrega variáveis de ambiente do arquivo .env
 load_dotenv()
@@ -32,7 +32,7 @@ def init_db():
         )
     ''')
 
-    # Super Lista estratégica (Dados Restaurados e Completos)
+    # Super Lista estratégica intacta
     dados = [
         # ADIÇÃO ESPECIAL PARA SUA AMIGA
         ('Rocaltrol', 'Calcitriol', 'REFERENCIA', '0.25mcg capsula', 115.00),
@@ -109,63 +109,37 @@ db_conn = init_db()
 
 def buscar_remedio_inteligente(termo_usuario, conn):
     cursor = conn.cursor()
-    # 1. Pegamos todos os nomes de remédios de REFERENCIA para comparar
     cursor.execute("SELECT DISTINCT nome FROM remedio WHERE tipo = 'REFERENCIA'")
     nomes_referencia = [row[0] for row in cursor.fetchall()]
     
     if not nomes_referencia:
         return None, False
         
-    # 2. Encontramos a melhor correspondência
     melhor_match, score = process.extractOne(termo_usuario, nomes_referencia, scorer=fuzz.token_sort_ratio)
     
-    print(f"DEBUG: Usuário digitou '{termo_usuario}', match com '{melhor_match}' (Score: {score})")
-    
     if score >= 85:
-        # Se for quase igual, já faz a busca direto com o nome corrigido
         return melhor_match, True
     elif score >= 60:
-        # Se for parecido, retorna para sugerir ao usuário
         return melhor_match, False
     else:
-        # Se for nada a ver, não encontrou
         return None, False
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text.strip()
+async def realizar_comparacao_e_enviar(update_or_query, nome_ref_correto):
+    """Lógica centralizada para buscar dados, comparar e responder."""
     cursor = db_conn.cursor()
-    
-    # Busca inteligente
-    nome_correto, exato = buscar_remedio_inteligente(user_text, db_conn)
-    
-    if not nome_correto:
-        await update.message.reply_text(
-            f"Poxa, ainda não temos o medicamento '{user_text}' em nossa base. 😕",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return
-
-    if not exato:
-        # Sugestão amigável caso tenha erro de digitação
-        keyboard = [[nome_correto]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await update.message.reply_text(
-            f"Você quis dizer '{nome_correto}'? Clique no botão abaixo para confirmar:",
-            reply_markup=reply_markup
-        )
-        return
-
-    # Se chegou aqui, nome_correto é o nome exato do remédio de REFERENCIA
-    cursor.execute("SELECT nome, principio_ativo, tipo, apresentacao, preco FROM remedio WHERE nome = ?", (nome_correto,))
+    cursor.execute("SELECT nome, principio_ativo, tipo, apresentacao, preco FROM remedio WHERE nome = ?", (nome_ref_correto,))
     res = cursor.fetchone()
     
     if not res:
-        await update.message.reply_text("Ocorreu um erro ao buscar os dados do medicamento.", reply_markup=ReplyKeyboardRemove())
+        msg = "Ocorreu um erro ao buscar os dados do medicamento."
+        if isinstance(update_or_query, Update):
+            await update_or_query.message.reply_text(msg)
+        else:
+            await update_or_query.edit_message_text(msg)
         return
-        
+
     nome_ref, principio, tipo, apresentacao, preco_ref = res
 
-    # Busca genéricos equivalentes
     cursor.execute("""
         SELECT nome, preco FROM remedio 
         WHERE principio_ativo = ? AND apresentacao = ? AND tipo = 'GENERICO'
@@ -175,11 +149,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     generico = cursor.fetchone()
     
     if not generico:
-        await update.message.reply_text(
-            f"Encontrei o {nome_ref} (R$ {preco_ref:.2f}), mas não temos genéricos para "
-            f"{principio} ({apresentacao}) no momento.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+        msg = f"Encontrei o {nome_ref} (R$ {preco_ref:.2f}), mas não temos genéricos para {principio} ({apresentacao}) no momento."
+        if isinstance(update_or_query, Update):
+            await update_or_query.message.reply_text(msg)
+        else:
+            await update_or_query.edit_message_text(msg)
         return
 
     nome_gen, preco_gen = generico
@@ -194,14 +168,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📉 Economia de: R$ {economia_reais:.2f} ({economia_percent:.1f}%)"
     )
     
-    await update.message.reply_text(resposta, reply_markup=ReplyKeyboardRemove())
+    if isinstance(update_or_query, Update):
+        await update_or_query.message.reply_text(resposta)
+    else:
+        await update_or_query.edit_message_text(resposta)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text.strip()
+    
+    nome_correto, exato = buscar_remedio_inteligente(user_text, db_conn)
+    
+    if not nome_correto:
+        await update.message.reply_text(f"Poxa, ainda não temos o medicamento '{user_text}' em nossa base. 😕")
+        return
+
+    if exato:
+        await realizar_comparacao_e_enviar(update, nome_correto)
+    else:
+        # Sugestão com botões Inline
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Sim", callback_data=f"sim_{nome_correto}"),
+                InlineKeyboardButton("❌ Não", callback_data="nao")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"Você quis dizer '{nome_correto}'?",
+            reply_markup=reply_markup
+        )
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer() # Para o spinner no Telegram
+
+    if query.data.startswith("sim_"):
+        nome_sugerido = query.data.split("sim_")[1]
+        await realizar_comparacao_e_enviar(query, nome_sugerido)
+    else:
+        await query.edit_message_text("Tudo bem! Tente digitar o nome novamente para eu te ajudar. 💊")
 
 if __name__ == '__main__':
-    # Inicialização direta, sem proxy (Railway/Render/Local)
     application = ApplicationBuilder().token(TOKEN).build()
 
-    message_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
-    application.add_handler(message_handler)
+    # Handlers
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    application.add_handler(CallbackQueryHandler(handle_callback))
 
-    print("FarmaBot rodando liso...")
+    print("FarmaBot rodando liso com botões Inline...")
     application.run_polling()
