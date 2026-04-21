@@ -1,6 +1,7 @@
 import logging
 import os
 import psycopg2
+import pandas as pd
 from psycopg2 import extras
 from datetime import datetime
 from dotenv import load_dotenv
@@ -240,10 +241,103 @@ async def comando_carga(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text(f"✅ Carga finalizada!\nSucesso: {sucesso}\nErros: {erro}")
 
+def normalize_text(text):
+    if pd.isna(text): return ""
+    return str(text).title().strip()
+
+def normalize_type(text):
+    if pd.isna(text): return ""
+    text = str(text).upper()
+    if "GENÉRICO" in text or "GENERICO" in text: return "GENERICO"
+    if "REFERÊNCIA" in text or "REFERENCIA" in text: return "REFERENCIA"
+    if "SIMILAR" in text: return "SIMILAR"
+    return text
+
+async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lê o Excel da ANVISA localmente e processa em lotes."""
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        await update.message.reply_text("⛔ Acesso negado.")
+        return
+
+    caminho_arquivo = "data/lista_anvisa.xlsx"
+    if not os.path.exists(caminho_arquivo):
+        await update.message.reply_text(f"❌ Erro: Arquivo {caminho_arquivo} não encontrado em /data.")
+        return
+
+    await update.message.reply_text("🚀 Iniciando processamento do arquivo ANVISA... Isso pode demorar.")
+
+    try:
+        # Tenta ler o Excel procurando as colunas necessárias (pode precisar de skiprows se houver cabeçalho da ANVISA)
+        df = None
+        colunas_necessarias = ['EAN 1', 'SUBSTÂNCIA', 'PRODUTO', 'LABORATÓRIO', 'APRESENTAÇÃO', 'TIPO DE PRODUTO', 'PMC 20%']
+        
+        # Tentativa inteligente de encontrar o cabeçalho (pula até 60 linhas de lixo da ANVISA)
+        for i in range(0, 60):
+            temp_df = pd.read_excel(caminho_arquivo, skiprows=i)
+            if all(col in temp_df.columns for col in colunas_necessarias):
+                df = temp_df
+                break
+        
+        if df is None:
+            await update.message.reply_text("❌ Erro: Não foi possível encontrar as colunas esperadas no Excel.")
+            return
+
+        # Filtra e limpa
+        df = df[colunas_necessarias].copy()
+        df['EAN 1'] = df['EAN 1'].astype(str).str.replace(r'\.0$', '', regex=True)
+        df['SUBSTÂNCIA'] = df['SUBSTÂNCIA'].apply(normalize_text)
+        df['PRODUTO'] = df['PRODUTO'].apply(normalize_text)
+        df['LABORATÓRIO'] = df['LABORATÓRIO'].apply(normalize_text)
+        df['APRESENTAÇÃO'] = df['APRESENTAÇÃO'].apply(normalize_text)
+        df['TIPO DE PRODUTO'] = df['TIPO DE PRODUTO'].apply(normalize_type)
+        df['PMC 20%'] = pd.to_numeric(df['PMC 20%'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0.0)
+
+        total_registros = len(df)
+        batch_size = 1000
+        processados = 0
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        for i in range(0, total_registros, batch_size):
+            batch = df.iloc[i : i + batch_size]
+            dados_batch = [
+                (
+                    row['EAN 1'], row['PRODUTO'], row['SUBSTÂNCIA'], row['LABORATÓRIO'], 
+                    "", row['APRESENTAÇÃO'], float(row['PMC 20%']), row['TIPO DE PRODUTO']
+                )
+                for _, row in batch.iterrows()
+            ]
+
+            cursor.executemany("""
+                INSERT INTO remedio (ean, nome_comercial, principio_ativo, laboratorio, dosagem, forma_farmaceutica, preco, tipo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ean) DO UPDATE SET 
+                preco=EXCLUDED.preco, 
+                nome_comercial=EXCLUDED.nome_comercial,
+                principio_ativo=EXCLUDED.principio_ativo,
+                laboratorio=EXCLUDED.laboratorio,
+                forma_farmaceutica=EXCLUDED.forma_farmaceutica,
+                tipo=EXCLUDED.tipo;
+            """, dados_batch)
+            
+            conn.commit()
+            processados += len(batch)
+            await update.message.reply_text(f"⏳ Processando: {processados}/{total_registros}...")
+
+        cursor.close()
+        conn.close()
+        await update.message.reply_text(f"✅ Carga Completa finalizada! {processados} medicamentos processados/atualizados.")
+
+    except Exception as e:
+        logging.error(f"Erro na carga completa: {e}")
+        await update.message.reply_text(f"❌ Erro crítico: {str(e)}")
+
 if __name__ == '__main__':
     init_db()
     application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler("carga", comando_carga))
+    application.add_handler(CommandHandler("carga_completa", comando_carga_completa))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
     print("FarmaBot PRO iniciado...")

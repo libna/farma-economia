@@ -3,3 +3,5 @@ python-dotenv
 thefuzz
 python-Levenshtein
 psycopg2-binary
+pandas
+openpyxl
