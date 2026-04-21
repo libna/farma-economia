@@ -43,19 +43,24 @@ def init_db():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Tabela de Medicamentos (Schema ANVISA-Ready)
+        # Tabela de Medicamentos (Schema ANVISA-Ready com limites expandidos)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS remedio (
                 ean VARCHAR(13) PRIMARY KEY,
-                nome_comercial VARCHAR(255),
-                principio_ativo VARCHAR(255),
-                laboratorio VARCHAR(255),
-                dosagem VARCHAR(100),
-                forma_farmaceutica VARCHAR(100),
+                nome_comercial VARCHAR(500),
+                principio_ativo VARCHAR(500),
+                laboratorio VARCHAR(500),
+                dosagem VARCHAR(255),
+                forma_farmaceutica VARCHAR(500),
                 preco DECIMAL(10,2),
-                tipo VARCHAR(50)
+                tipo VARCHAR(100)
             )
         ''')
+
+        # Migração Automática para bases existentes
+        colunas_para_expandir = ['nome_comercial', 'principio_ativo', 'laboratorio', 'forma_farmaceutica']
+        for col in colunas_para_expandir:
+            cursor.execute(f"ALTER TABLE remedio ALTER COLUMN {col} TYPE VARCHAR(500);")
 
         # Tabela de Logs (Business Intelligence)
         cursor.execute('''
@@ -253,6 +258,11 @@ def normalize_type(text):
     if "SIMILAR" in text: return "SIMILAR"
     return text
 
+async def update_message_progress(update, processados, total):
+    """Atualiza o progresso no Telegram a cada 5000 registros para evitar bloqueio."""
+    if processados % 5000 == 0 or processados == total:
+        await update.message.reply_text(f"⏳ Processando: {processados}/{total}...")
+
 async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lê o Excel da ANVISA localmente e processa em lotes."""
     if str(update.effective_user.id) != str(ADMIN_ID):
@@ -305,13 +315,13 @@ async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_T
         df['preco'] = df['preco'].str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
         df['preco'] = pd.to_numeric(df['preco'], errors='coerce').fillna(0.0)
 
-        # 5. Normalização de Dados
-        df['ean'] = df['ean'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        df['principio_ativo'] = df['principio_ativo'].apply(normalize_text)
-        df['nome_comercial'] = df['nome_comercial'].apply(normalize_text)
-        df['laboratorio'] = df['laboratorio'].apply(normalize_text)
-        df['apresentacao'] = df['apresentacao'].apply(normalize_text)
-        df['tipo'] = df['tipo'].apply(normalize_type)
+        # 5. Normalização de Dados (com Slicing de segurança)
+        df['ean'] = df['ean'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.slice(0, 13)
+        df['principio_ativo'] = df['principio_ativo'].apply(normalize_text).str.slice(0, 490)
+        df['nome_comercial'] = df['nome_comercial'].apply(normalize_text).str.slice(0, 490)
+        df['laboratorio'] = df['laboratorio'].apply(normalize_text).str.slice(0, 490)
+        df['apresentacao'] = df['apresentacao'].apply(normalize_text).str.slice(0, 490)
+        df['tipo'] = df['tipo'].apply(normalize_type).str.slice(0, 90)
 
         total_registros = len(df)
         batch_size = 1000
@@ -323,30 +333,35 @@ async def comando_carga_completa(update: Update, context: ContextTypes.DEFAULT_T
         cursor = conn.cursor()
 
         for i in range(0, total_registros, batch_size):
-            batch = df.iloc[i : i + batch_size]
-            dados_batch = [
-                (
-                    row['ean'], row['nome_comercial'], row['principio_ativo'], row['laboratorio'], 
-                    "", row['apresentacao'], float(row['preco']), row['tipo']
-                )
-                for _, row in batch.iterrows()
-            ]
+            try:
+                batch = df.iloc[i : i + batch_size]
+                dados_batch = [
+                    (
+                        row['ean'], row['nome_comercial'], row['principio_ativo'], row['laboratorio'], 
+                        "", row['apresentacao'], float(row['preco']), row['tipo']
+                    )
+                    for _, row in batch.iterrows()
+                ]
 
-            cursor.executemany("""
-                INSERT INTO remedio (ean, nome_comercial, principio_ativo, laboratorio, dosagem, forma_farmaceutica, preco, tipo)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ean) DO UPDATE SET 
-                preco=EXCLUDED.preco, 
-                nome_comercial=EXCLUDED.nome_comercial,
-                principio_ativo=EXCLUDED.principio_ativo,
-                laboratorio=EXCLUDED.laboratorio,
-                forma_farmaceutica=EXCLUDED.forma_farmaceutica,
-                tipo=EXCLUDED.tipo;
-            """, dados_batch)
-            
-            conn.commit()
-            processados += len(batch)
-            await update.message.reply_text(f"⏳ Processando: {processados}/{total_registros}...")
+                cursor.executemany("""
+                    INSERT INTO remedio (ean, nome_comercial, principio_ativo, laboratorio, dosagem, forma_farmaceutica, preco, tipo)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (ean) DO UPDATE SET 
+                    preco=EXCLUDED.preco, 
+                    nome_comercial=EXCLUDED.nome_comercial,
+                    principio_ativo=EXCLUDED.principio_ativo,
+                    laboratorio=EXCLUDED.laboratorio,
+                    forma_farmaceutica=EXCLUDED.forma_farmaceutica,
+                    tipo=EXCLUDED.tipo;
+                """, dados_batch)
+                
+                conn.commit()
+                processados += len(batch)
+                await update_message_progress(update, processados, total_registros)
+            except Exception as batch_e:
+                conn.rollback()
+                logging.error(f"Erro no lote {i//batch_size}: {batch_e}")
+                await update.message.reply_text(f"⚠️ Erro no lote {i//batch_size + 1}: {str(batch_e)[:200]}")
 
         cursor.close()
         conn.close()
