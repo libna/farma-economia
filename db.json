@@ -1,0 +1,114 @@
+{
+  "remedios": [
+    {
+      "id": 1,
+      "ean": "7891317449212",
+      "nome_comercial": "Buscofem",
+      "principio_ativo": "Ibuprofeno",
+      "laboratorio": "Boehringer Ingelheim",
+      "dosagem": "400mg",
+      "forma_farmaceutica": "Cápsula Mole",
+      "preco": 25.50,
+      "tipo": "REFERENCIA"
+    },
+    {
+      "id": 2,
+      "ean": "7896004724110",
+      "nome_comercial": "Ibuprofeno EMS",
+      "principio_ativo": "Ibuprofeno",
+      "laboratorio": "EMS",
+      "dosagem": "400mg",
+      "forma_farmaceutica": "Cápsula Mole",
+      "preco": 10.50,
+      "tipo": "GENERICO"
+    },
+    {
+      "id": 3,
+      "ean": "7891058001105",
+      "nome_comercial": "Tylenol",
+      "principio_ativo": "Paracetamol",
+      "laboratorio": "Janssen-Cilag",
+      "dosagem": "500mg",
+      "forma_farmaceutica": "Comprimido",
+      "preco": 18.00,
+      "tipo": "REFERENCIA"
+    },
+    {
+      "id": 4,
+      "ean": "7896714214224",
+      "nome_comercial": "Paracetamol Neo Química",
+      "principio_ativo": "Paracetamol",
+      "laboratorio": "Neo Química",
+      "dosagem": "500mg",
+      "forma_farmaceutica": "Comprimido",
+      "preco": 8.50,
+      "tipo": "GENERICO"
+    },
+    {
+      "id": 5,
+      "ean": "7896004702118",
+      "nome_comercial": "Novalgina",
+      "principio_ativo": "Dipirona",
+      "laboratorio": "Sanofi",
+      "dosagem": "500mg",
+      "forma_farmaceutica": "Comprimido",
+      "preco": 22.00,
+      "tipo": "REFERENCIA"
+    },
+    {
+      "id": 6,
+      "ean": "7896714201118",
+      "nome_comercial": "Dipirona Monoidratada Eurofarma",
+      "principio_ativo": "Dipirona",
+      "laboratorio": "Eurofarma",
+      "dosagem": "500mg",
+      "forma_farmaceutica": "Comprimido",
+      "preco": 7.90,
+      "tipo": "GENERICO"
+    },
+    {
+      "id": 7,
+      "ean": "7891058021301",
+      "nome_comercial": "Amoxil",
+      "principio_ativo": "Amoxicilina",
+      "laboratorio": "GSK",
+      "dosagem": "500mg",
+      "forma_farmaceutica": "Cápsula",
+      "preco": 32.00,
+      "tipo": "REFERENCIA"
+    },
+    {
+      "id": 8,
+      "ean": "7896004719222",
+      "nome_comercial": "Amoxicilina Medley",
+      "principio_ativo": "Amoxicilina",
+      "laboratorio": "Medley",
+      "dosagem": "500mg",
+      "forma_farmaceutica": "Cápsula",
+      "preco": 14.80,
+      "tipo": "GENERICO"
+    },
+    {
+      "id": 9,
+      "ean": "7896523260019",
+      "nome_comercial": "Losec",
+      "principio_ativo": "Omeprazol",
+      "laboratorio": "AstraZeneca",
+      "dosagem": "20mg",
+      "forma_farmaceutica": "Cápsula",
+      "preco": 45.00,
+      "tipo": "REFERENCIA"
+    },
+    {
+      "id": 10,
+      "ean": "7896714238008",
+      "nome_comercial": "Omeprazol Neo Química",
+      "principio_ativo": "Omeprazol",
+      "laboratorio": "Neo Química",
+      "dosagem": "20mg",
+      "forma_farmaceutica": "Cápsula",
+      "preco": 16.90,
+      "tipo": "GENERICO"
+    }
+  ]
+}
